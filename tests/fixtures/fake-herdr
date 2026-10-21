@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Minimal herdr stub for bats. Logs argv to HERDR_STUB_LOG; returns canned JSON.
+set -euo pipefail
+
+log="${HERDR_STUB_LOG:-/dev/null}"
+printf '%s\n' "$*" >>"$log"
+
+cmd="${1:-}"
+sub="${2:-}"
+repo="${HERDR_STUB_REPO:-/tmp/repo}"
+wid="${HERDR_STUB_WID:-w-stub}"
+path="${HERDR_STUB_WT_PATH:-$repo}"
+tab="${HERDR_STUB_ROOT_TAB:-w-stub:t0}"
+
+case "$cmd $sub" in
+  "workspace list")
+    jq -nc --arg repo "$repo" --arg wid "$wid" \
+      '{id:"cli:workspace:list",result:{type:"workspace_list",workspaces:[{workspace_id:$wid,label:"stub",worktree:{repo_root:$repo,checkout_path:$repo}}]}}'
+    ;;
+  "worktree list")
+    # Default: no existing linked worktrees (forces create path in tests that need it)
+    if [[ "${HERDR_STUB_HAS_WT:-0}" == "1" ]]; then
+      branch="${HERDR_STUB_BRANCH:-spec/X}"
+      jq -nc --arg b "$branch" --arg p "$path" --arg wid "$wid" \
+        '{id:"cli:worktree:list",result:{worktrees:[{branch:$b,is_linked_worktree:true,open_workspace_id:$wid,path:$p}]}}'
+    else
+      printf '%s\n' '{"id":"cli:worktree:list","result":{"worktrees":[]}}'
+    fi
+    ;;
+  "worktree create" | "worktree open")
+    jq -nc --arg p "$path" --arg wid "$wid" --arg tab "$tab" \
+      '{id:"cli:worktree:op",result:{worktree:{path:$p},workspace:{workspace_id:$wid,active_tab_id:$tab},root_pane:{pane_id:($wid+":p0"),tab_id:$tab,cwd:$p}}}'
+    ;;
+  "workspace create")
+    jq -nc --arg p "$path" --arg wid "$wid" --arg tab "$tab" \
+      '{id:"cli:workspace:create",result:{workspace:{workspace_id:$wid,active_tab_id:$tab},root_pane:{pane_id:($wid+":p0"),tab_id:$tab,cwd:$p}}}'
+    ;;
+  "tab create")
+    printf '%s\n' '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"w-stub:p1","tab_id":"w-stub:t1"},"tab":{"tab_id":"w-stub:t1"}}}'
+    ;;
+  "tab rename" | "tab focus" | "tab close")
+    printf '%s\n' '{"ok":true}'
+    ;;
+  "agent start" | "agent prompt" | "agent focus")
+    printf '%s\n' '{"ok":true}'
+    ;;
+  "agent get")
+    name="${3:-}"
+    jq -nc --arg n "$name" '{id:"cli:agent:get",result:{agent:{name:$n,agent_status:"idle"}}}'
+    ;;
+  "workspace focus")
+    printf '%s\n' '{"ok":true}'
+    ;;
+  *)
+    printf '%s\n' '{"ok":true}'
+    ;;
+esac

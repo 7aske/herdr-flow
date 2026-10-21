@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# herdr-flow — Taskwarrior → Herder phase workflow (MVP)
+set -euo pipefail
+
+# Resolve symlinks (e.g. ~/.local/bin/herdr-flow → repo/bin/herdr-flow)
+_hf_src="${BASH_SOURCE[0]}"
+while [[ -L "$_hf_src" ]]; do
+  _hf_dir="$(cd "$(dirname "$_hf_src")" && pwd)"
+  _hf_src="$(readlink "$_hf_src")"
+  [[ "$_hf_src" != /* ]] && _hf_src="$_hf_dir/$_hf_src"
+done
+ROOT="$(cd "$(dirname "$_hf_src")/.." && pwd)"
+unset _hf_src _hf_dir
+# shellcheck source=lib/common.sh
+source "$ROOT/lib/common.sh"
+# shellcheck source=lib/tw-bridge.sh
+source "$ROOT/lib/tw-bridge.sh"
+# shellcheck source=lib/artifacts.sh
+source "$ROOT/lib/artifacts.sh"
+# shellcheck source=lib/herdr-git.sh
+source "$ROOT/lib/herdr-git.sh"
+# shellcheck source=lib/phases.sh
+source "$ROOT/lib/phases.sh"
+# shellcheck source=lib/ship-pr.sh
+source "$ROOT/lib/ship-pr.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  herdr-flow --help
+  herdr-flow start <tw-id|uuid> [--phase spec|plan|build|review]
+  herdr-flow resume <tw-id|uuid>
+  herdr-flow open-artifact <tw-id|uuid>
+  herdr-flow next-task <tw-id|uuid>
+  herdr-flow phase-done <tw-id|uuid>
+  herdr-flow ship-pr <tw-id|uuid> [--create-only|--run] [--no-draft] [--no-push]
+EOF
+}
+
+cmd_open_artifact() {
+  [[ $# -ge 1 ]] || herdr_flow_die "open-artifact: need <tw-id|uuid>"
+  local id="$1"
+  local uuid phase path key
+  uuid="$(tw_bridge_uuid "$id")"
+  phase="$(tw_bridge_get "$uuid" phase)"
+  [[ -n "$phase" ]] || herdr_flow_die "task $uuid missing UDA phase"
+  path="$(tw_bridge_get "$uuid" artifact)"
+  if [[ -z "$path" ]]; then
+    key="$(tw_bridge_ticket_key "$uuid")"
+    path="$(artifacts_ensure "$key" "$phase")"
+    tw_bridge_set "$uuid" "artifact:$path"
+  fi
+  [[ -e "$path" ]] || path="$(artifacts_ensure "$(tw_bridge_ticket_key "$uuid")" "$phase")"
+  artifacts_open "$path"
+}
+
+cmd_start() {
+  local id="" phase=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --phase)
+        [[ $# -ge 2 ]] || herdr_flow_die "start: --phase needs a value"
+        phase="$2"
+        shift 2
+        ;;
+      -*)
+        herdr_flow_die "start: unknown flag: $1"
+        ;;
+      *)
+        [[ -z "$id" ]] || herdr_flow_die "start: unexpected arg: $1"
+        id="$1"
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$id" ]] || herdr_flow_die "start: need <tw-id|uuid>"
+  local session
+  session="$(phases_start "$id" "$phase")"
+  herdr_flow_info "started session $session"
+}
+
+cmd_resume() {
+  [[ $# -ge 1 ]] || herdr_flow_die "resume: need <tw-id|uuid>"
+  local session
+  session="$(phases_resume "$1")"
+  herdr_flow_info "resumed session $session"
+}
+
+cmd_phase_done() {
+  [[ $# -ge 1 ]] || herdr_flow_die "phase-done: need <tw-id|uuid>"
+  local uuid
+  uuid="$(phases_done "$1")"
+  herdr_flow_info "phase-done $uuid"
+}
+
+cmd_next_task() {
+  [[ $# -ge 1 ]] || herdr_flow_die "next-task: need <tw-id|uuid>"
+  phases_next_task "$1"
+}
+
+cmd_ship_pr() {
+  local id="" create_only=0 draft=1 do_push=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --create-only)
+        create_only=1
+        shift
+        ;;
+      --run)
+        create_only=0
+        shift
+        ;;
+      --no-draft)
+        draft=0
+        shift
+        ;;
+      --no-push)
+        do_push=0
+        shift
+        ;;
+      -*)
+        herdr_flow_die "ship-pr: unknown flag: $1"
+        ;;
+      *)
+        [[ -z "$id" ]] || herdr_flow_die "ship-pr: unexpected arg: $1"
+        id="$1"
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$id" ]] || herdr_flow_die "ship-pr: need <tw-id|uuid>"
+  local uuid
+  uuid="$(tw_bridge_uuid "$id")"
+  if [[ "$create_only" == "1" ]]; then
+    local new
+    new="$(ship_pr_create_task "$uuid" "$draft")"
+    herdr_flow_info "ship-pr task $new"
+    return 0
+  fi
+  ship_pr_run "$uuid" "$do_push" "$draft"
+  herdr_flow_info "ship-pr finished for $uuid"
+}
+
+main() {
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  local cmd="$1"
+  shift
+
+  case "$cmd" in
+    -h | --help | help)
+      usage
+      exit 0
+      ;;
+    open-artifact) cmd_open_artifact "$@" ;;
+    start) cmd_start "$@" ;;
+    resume) cmd_resume "$@" ;;
+    phase-done) cmd_phase_done "$@" ;;
+    next-task) cmd_next_task "$@" ;;
+    ship-pr) cmd_ship_pr "$@" ;;
+    *)
+      herdr_flow_die "unknown command: $cmd (try --help)"
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# taskwarrior-tui shortcut entry for herdr-flow.
+# Receives selected task UUID(s) as args (same contract as tw-agent).
+set -euo pipefail
+
+# Resolve symlinks (e.g. ~/.local/bin/herdr-flow-tui → repo/bin/…)
+_hf_src="${BASH_SOURCE[0]}"
+while [[ -L "$_hf_src" ]]; do
+  _hf_dir="$(cd "$(dirname "$_hf_src")" && pwd)"
+  _hf_src="$(readlink "$_hf_src")"
+  [[ "$_hf_src" != /* ]] && _hf_src="$_hf_dir/$_hf_src"
+done
+ROOT="$(cd "$(dirname "$_hf_src")/.." && pwd)"
+unset _hf_src _hf_dir
+FLOW="${HERDR_FLOW_BIN:-$ROOT/bin/herdr-flow}"
+LOG_DIR="${HERDR_FLOW_LOG_DIR:-$HOME/.local/share/herdr-flow/logs}"
+mkdir -p "$LOG_DIR"
+
+# shellcheck source=lib/common.sh
+source "$ROOT/lib/common.sh"
+
+die() { herdr_flow_die "$*"; }
+
+[[ -x "$FLOW" ]] || die "herdr-flow not executable: $FLOW"
+[[ $# -gt 0 ]] || die "need at least one task uuid (from taskwarrior-tui)"
+
+ACTIONS=$'start:spec\nstart:plan\nstart:build\nstart:review\nstart:auto\nresume\nopen-artifact\nnext-task\nphase-done\nship-pr:create\nship-pr:run'
+
+pick_action() {
+  command -v fzf >/dev/null 2>&1 || die "fzf required (works over ssh; no rofi)"
+  # Pipe candidates in; fzf talks to /dev/tty for keys/UI (ssh + taskwarrior-tui).
+  printf '%s\n' "$ACTIONS" | fzf --prompt='herdr-flow> ' --height=40% --no-mouse || return 0
+}
+
+run_bg() {
+  local blog="$1"
+  shift
+  # Intentional single-quoted remote script; args passed positionally after _.
+  # shellcheck disable=SC2016
+  nohup bash -c '
+    blog="$1"; shift
+    root="$1"; shift
+    # shellcheck source=/dev/null
+    source "$root/lib/common.sh"
+    set +e
+    "$@" >>"$blog" 2>&1
+    ec=$?
+    set -e
+    if [[ "$ec" -ne 0 ]]; then
+      err="$(tail -n 5 "$blog" 2>/dev/null | tr "\n" " " )"
+      [[ -n "$err" ]] || err="exit $ec — $blog"
+      herdr_flow_notify "herdr-flow FAILED" "$err" request
+    fi
+    exit "$ec"
+  ' _ "$blog" "$ROOT" "$@" >/dev/null 2>&1 &
+  disown $! 2>/dev/null || true
+}
+
+open_artifact_term() {
+  local uuid="$1"
+  local cmd
+  cmd=$(printf '%q %q %q' "$FLOW" open-artifact "$uuid")
+  if command -v wtoggle2 >/dev/null 2>&1; then
+    nohup wtoggle2 -T -d75%x75% bash -lc "$cmd" >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
+  elif [[ -n "${TERMINAL:-}" ]]; then
+    # shellcheck disable=SC2086
+    nohup $TERMINAL -e bash -lc "$cmd" >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
+  else
+    die "open-artifact needs wtoggle2 or \$TERMINAL"
+  fi
+}
+
+action="$(pick_action)"
+[[ -n "$action" ]] || exit 0
+
+blog="$LOG_DIR/tui-$(date +%Y%m%dT%H%M%S).log"
+count=$#
+herdr_flow_info "Running $action on $count task(s) — log $blog"
+
+for uuid in "$@"; do
+  case "$action" in
+    start:spec | start:plan | start:build | start:review)
+      phase="${action#start:}"
+      run_bg "$blog" "$FLOW" start "$uuid" --phase "$phase"
+      ;;
+    start:auto)
+      run_bg "$blog" "$FLOW" start "$uuid"
+      ;;
+    resume)
+      run_bg "$blog" "$FLOW" resume "$uuid"
+      ;;
+    open-artifact)
+      open_artifact_term "$uuid"
+      ;;
+    next-task)
+      run_bg "$blog" "$FLOW" next-task "$uuid"
+      ;;
+    phase-done)
+      run_bg "$blog" "$FLOW" phase-done "$uuid"
+      ;;
+    ship-pr:create)
+      run_bg "$blog" "$FLOW" ship-pr "$uuid" --create-only
+      ;;
+    ship-pr:run)
+      run_bg "$blog" "$FLOW" ship-pr "$uuid"
+      ;;
+    *)
+      die "unknown action: $action"
+      ;;
+  esac
+done
+
+exit 0
